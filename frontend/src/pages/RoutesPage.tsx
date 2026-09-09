@@ -1,3 +1,4 @@
+// BEE_SYS_ROUTES_HOTFIX_2026_09_09
 import {useEffect,useMemo,useState} from 'react'
 import {useMutation,useQuery,useQueryClient} from '@tanstack/react-query'
 import {api} from '@/services/api'
@@ -10,7 +11,7 @@ import {GripVertical,Lock,LockOpen,MapPin,RotateCcw,Trash2,X} from 'lucide-react
 
 const strategies=[['balanced','Equilibrado'],['sales','Mais vendas prováveis'],['visits','Mais visitas possíveis'],['distance','Menor deslocamento'],['manual','Ordem manual']] as const
 const money=(v?:number)=>v==null?'—':v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'})
-const conversionProbability=(lead:Lead)=>((lead as Lead & {conversion_probability?:number}).conversion_probability ?? 0)
+const conversionProbability=(lead:Lead)=>Number((lead as any)["conversion_probability"] ?? 0)
 
 export function RoutesPage(){
  const qc=useQueryClient()
