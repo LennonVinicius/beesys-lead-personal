@@ -1,10 +1,23 @@
-const CACHE='beesys-lead-shell-v1';
-const SHELL=['/','/manifest.webmanifest'];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting())));
-self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
-self.addEventListener('fetch',e=>{
-  if(e.request.method!=='GET')return;
-  const u=new URL(e.request.url);
-  if(u.origin!==location.origin)return;
-  e.respondWith(fetch(e.request).then(r=>{const cp=r.clone();caches.open(CACHE).then(c=>c.put(e.request,cp));return r}).catch(()=>caches.match(e.request).then(r=>r||caches.match('/'))));
-});
+/*
+ * BeeSys Lead Search - Service Worker de desativação.
+ *
+ * A versão anterior fazia cache amplo do shell e dos bundles da Vite, o que
+ * podia produzir tela branca após um novo deploy. Este worker existe apenas
+ * para substituir instalações antigas, apagar os caches e se desregistrar.
+ */
+self.addEventListener('install', (event) => {
+  self.skipWaiting()
+  event.waitUntil(Promise.resolve())
+})
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys()
+      await Promise.all(keys.filter((key) => key.startsWith('beesys-lead-')).map((key) => caches.delete(key)))
+      await self.registration.unregister()
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      for (const client of clients) client.navigate(client.url)
+    })(),
+  )
+})
