@@ -1,4 +1,4 @@
-// BEE_SYS_ROUTES_HOTFIX_2026_09_09
+// BEE_SYS_CAMPAIGNS_RENDER_FIX_2026_09_09
 import {useEffect,useMemo,useState} from 'react'
 import {useMutation,useQuery,useQueryClient} from '@tanstack/react-query'
 import {api} from '@/services/api'
@@ -12,13 +12,15 @@ import {GripVertical,Lock,LockOpen,MapPin,RotateCcw,Trash2,X} from 'lucide-react
 const strategies=[['balanced','Equilibrado'],['sales','Mais vendas prováveis'],['visits','Mais visitas possíveis'],['distance','Menor deslocamento'],['manual','Ordem manual']] as const
 const money=(v?:number)=>v==null?'—':v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'})
 const conversionProbability=(lead:Lead)=>Number((lead as any)["conversion_probability"] ?? 0)
+type CampaignItem=string|{campaign_name:string;leads?:number}
+const campaignName=(item:CampaignItem)=>typeof item==='string'?item:item.campaign_name
 
 export function RoutesPage(){
  const qc=useQueryClient()
  const q=useQuery({queryKey:['route-candidates'],queryFn:()=>api.get<Lead[]>('/api/leads?limit=500&visited=no&min_score=35')})
  const saved=useQuery({queryKey:['routes'],queryFn:()=>api.get<SavedRoute[]>('/api/routes?limit=30')})
  const team=useQuery({queryKey:['team'],queryFn:()=>api.get<string[]>('/api/team')})
- const campaigns=useQuery({queryKey:['campaigns'],queryFn:()=>api.get<string[]>('/api/campaigns')})
+ const campaigns=useQuery({queryKey:['campaigns'],queryFn:()=>api.get<CampaignItem[]>('/api/campaigns')})
 
  const[origin,setOrigin]=useState<[number,number]>([-23.1896,-45.8841])
  const[end,setEnd]=useState<[number,number]|null>(null)
@@ -40,6 +42,7 @@ export function RoutesPage(){
  const[minScore,setMinScore]=useState(50)
 
  const allLeads=q.data||[]
+ const campaignOptions=useMemo(()=>Array.from(new Set((campaigns.data||[]).map(campaignName).filter(Boolean))),[campaigns.data])
  const leads=useMemo(()=>allLeads.filter(l=>{
    if(l.is_large_chain||l.do_not_contact)return false
    if((l.visit_priority_score||0)<minScore)return false
@@ -69,7 +72,7 @@ export function RoutesPage(){
     <label className="text-sm font-medium">Nome da rota<input className="mt-1 h-10 w-full rounded-lg border border-border px-3" value={name} onChange={e=>setName(e.target.value)}/></label>
     <div className="grid grid-cols-2 gap-3"><label className="text-sm font-medium">Modo<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-3" value={mode} onChange={e=>setMode(e.target.value)}><option value="driving-car">Carro</option><option value="foot-walking">A pé</option></select></label><label className="text-sm font-medium">Estratégia<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-3" value={strategy} onChange={e=>setStrategy(e.target.value)}>{strategies.map(([v,n])=><option key={v} value={v}>{n}</option>)}</select></label></div>
     <div className="grid grid-cols-3 gap-2"><label className="text-xs font-medium">Tempo (min)<input type="number" className="mt-1 h-10 w-full rounded-lg border border-border px-2" value={available} onChange={e=>setAvailable(Number(e.target.value))}/></label><label className="text-xs font-medium">Visita (min)<input type="number" className="mt-1 h-10 w-full rounded-lg border border-border px-2" value={visit} onChange={e=>setVisit(Number(e.target.value))}/></label><label className="text-xs font-medium">Máx. paradas<input type="number" className="mt-1 h-10 w-full rounded-lg border border-border px-2" value={maxStops} onChange={e=>setMaxStops(Number(e.target.value))}/></label></div>
-    <div className="grid grid-cols-2 gap-2"><label className="text-xs font-medium">Responsável<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-2" value={assignedTo} onChange={e=>{setAssignedTo(e.target.value);setSelected([]);setPlan(null)}}><option value="">Todos</option>{(team.data||[]).map(x=><option key={x}>{x}</option>)}</select></label><label className="text-xs font-medium">Campanha<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-2" value={campaign} onChange={e=>{setCampaign(e.target.value);setSelected([]);setPlan(null)}}><option value="">Todas</option>{(campaigns.data||[]).map(x=><option key={x}>{x}</option>)}</select></label></div>
+    <div className="grid grid-cols-2 gap-2"><label className="text-xs font-medium">Responsável<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-2" value={assignedTo} onChange={e=>{setAssignedTo(e.target.value);setSelected([]);setPlan(null)}}><option value="">Todos</option>{(team.data||[]).map(x=><option key={x}>{x}</option>)}</select></label><label className="text-xs font-medium">Campanha<select className="mt-1 h-10 w-full rounded-lg border border-border bg-surface px-2" value={campaign} onChange={e=>{setCampaign(e.target.value);setSelected([]);setPlan(null)}}><option value="">Todas</option>{campaignOptions.map(x=><option key={x} value={x}>{x}</option>)}</select></label></div>
     <label className="text-xs font-medium">Prioridade mínima: {minScore}<input type="range" min="0" max="100" step="5" className="mt-2 w-full" value={minScore} onChange={e=>{setMinScore(Number(e.target.value));setSelected([]);setPlan(null)}}/></label>
     <Button variant="secondary" className="w-full" onClick={()=>currentPos().catch(()=>alert('Não foi possível acessar sua localização.'))}><MapPin className="h-4 w-4"/>Usar minha localização</Button>
     <div className="rounded-xl border border-border p-3"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={returnToStart} onChange={e=>{setReturnToStart(e.target.checked);if(e.target.checked)setEnd(null)}}/>Voltar ao ponto inicial</label><label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={!!end} disabled={returnToStart} onChange={e=>setEnd(e.target.checked?[origin[0],origin[1]]:null)}/>Usar destino final diferente</label>{end&&<div className="mt-2 grid grid-cols-2 gap-2"><input type="number" step="any" className="h-9 rounded-lg border border-border px-2 text-xs" value={end[0]} onChange={e=>setEnd([Number(e.target.value),end[1]])}/><input type="number" step="any" className="h-9 rounded-lg border border-border px-2 text-xs" value={end[1]} onChange={e=>setEnd([end[0],Number(e.target.value)])}/><p className="col-span-2 text-[11px] text-muted">Latitude e longitude do destino final. Pode ser casa, escritório ou outro compromisso.</p></div>}</div>
