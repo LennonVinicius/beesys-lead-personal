@@ -1,0 +1,5 @@
+import {Circle,CircleMarker,MapContainer,TileLayer,useMap,useMapEvents} from 'react-leaflet';import {useEffect} from 'react'
+type P={lat:number;lon:number;radius:number;onChange:(lat:number,lon:number)=>void;height?:number}
+function Events({onChange}:{onChange:P['onChange']}){useMapEvents({click:e=>onChange(e.latlng.lat,e.latlng.lng)});return null}
+function Recenter({lat,lon}:{lat:number;lon:number}){const map=useMap();useEffect(()=>{map.setView([lat,lon],Math.max(map.getZoom(),13))},[lat,lon,map]);return null}
+export function AreaPickerMap({lat,lon,radius,onChange,height=460}:P){return <MapContainer center={[lat,lon]} zoom={13} style={{height,borderRadius:16}} scrollWheelZoom><TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/><Events onChange={onChange}/><Recenter lat={lat} lon={lon}/><Circle center={[lat,lon]} radius={radius} pathOptions={{color:'#4338ca',fillColor:'#4338ca',fillOpacity:.08}}/><CircleMarker center={[lat,lon]} radius={8} pathOptions={{color:'#4338ca',fillColor:'#4338ca',fillOpacity:1}}/></MapContainer>}
