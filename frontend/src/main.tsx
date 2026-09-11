@@ -17,39 +17,21 @@ const qc = new QueryClient({
 })
 
 /**
- * A versão anterior registrava um Service Worker que armazenava HTML e bundles
- * da Vite. Em deploys novos isso podia deixar o navegador com um shell antigo
- * referenciando chunks que já não existiam, resultando em tela branca.
- *
- * Por enquanto priorizamos estabilidade: removemos registrations e caches
- * antigos. O manifest continua disponível; PWA offline poderá voltar depois
- * usando uma estratégia de cache versionada/Workbox.
+ * PWA conservadora: o SW atual usa network-first para navegação e cacheia
+ * somente bundles Vite versionados. Antes de registrar, removemos apenas
+ * registrations legados cujo script não é o /sw.js atual.
  */
-async function clearLegacyAppCache() {
-  if ('serviceWorker' in navigator) {
-    try {
-      const registrations = await navigator.serviceWorker.getRegistrations()
-      await Promise.all(registrations.map((registration) => registration.unregister()))
-    } catch (error) {
-      console.warn('[BeeSys Lead Search] Não foi possível remover Service Worker antigo', error)
+async function registerStablePwa(){
+  if(!('serviceWorker' in navigator))return
+  try{
+    const registrations=await navigator.serviceWorker.getRegistrations()
+    for(const r of registrations){
+      if(!r.active?.scriptURL.endsWith('/sw.js'))await r.unregister()
     }
-  }
-
-  if ('caches' in window) {
-    try {
-      const keys = await caches.keys()
-      await Promise.all(
-        keys
-          .filter((key) => key.startsWith('beesys-lead-'))
-          .map((key) => caches.delete(key)),
-      )
-    } catch (error) {
-      console.warn('[BeeSys Lead Search] Não foi possível limpar cache antigo', error)
-    }
-  }
+    if(import.meta.env.PROD)await navigator.serviceWorker.register('/sw.js',{updateViaCache:'none'})
+  }catch(error){console.warn('[BeeSys Lead Search] PWA indisponível',error)}
 }
-
-void clearLegacyAppCache()
+void registerStablePwa()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

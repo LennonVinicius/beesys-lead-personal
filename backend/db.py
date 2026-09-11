@@ -17,7 +17,7 @@ PIPELINE_STATUSES = [
 FOLLOWUP_STATUSES = ["PENDING", "DONE", "CANCELED"]
 
 # Increment this whenever init_db() gains a new schema migration.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 # Session-level advisory lock shared by every Render process connected to the
 # same PostgreSQL database. It prevents concurrent DDL migrations.
 MIGRATION_LOCK_ID = 846_537_221_905
@@ -234,6 +234,15 @@ def _apply_schema(conn):
     icp_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     audit_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     provider_usage_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    change_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    cadence_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    lead_cadence_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    automation_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    webhook_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    webhook_delivery_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    role_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    import_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    privacy_id = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
     _execute(
         conn,
@@ -344,6 +353,15 @@ def _apply_schema(conn):
         "owner_availability_note": "TEXT",
         "inactive_reason": "TEXT",
         "last_status_changed_at": "TEXT",
+        "identity_key": "TEXT",
+        "source_keys_json": "TEXT",
+        "digital_gap_score": "INTEGER",
+        "commercial_fit_score": "INTEGER",
+        "conversion_confidence": "INTEGER",
+        "expected_mrr_value": "REAL",
+        "product_fit_json": "TEXT",
+        "tags_json": "TEXT",
+        "change_summary_json": "TEXT",
     })
 
     _execute(
@@ -447,6 +465,15 @@ def _apply_schema(conn):
         )
         """,
     )
+    _ensure_columns(conn, "search_jobs", {
+        "source_counts_json": "TEXT",
+        "raw_discovered_count": "INTEGER DEFAULT 0",
+        "deduplicated_count": "INTEGER DEFAULT 0",
+        "incremental_from_job_id": "INTEGER",
+        "estimated_cost_usd": "REAL DEFAULT 0",
+        "snapshot_locked": "INTEGER DEFAULT 1",
+    })
+
     _execute(
         conn,
         f"""
@@ -634,6 +661,149 @@ def _apply_schema(conn):
         """,
     )
 
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS lead_changes (
+            id {change_id},
+            business_key TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            change_type TEXT NOT NULL DEFAULT 'UPDATED',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (business_key) REFERENCES businesses(business_key) ON DELETE CASCADE
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS cadence_templates (
+            id {cadence_id},
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            steps_json TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS lead_cadences (
+            id {lead_cadence_id},
+            business_key TEXT NOT NULL,
+            cadence_id INTEGER NOT NULL,
+            current_step INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            next_due_at TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (business_key) REFERENCES businesses(business_key) ON DELETE CASCADE,
+            FOREIGN KEY (cadence_id) REFERENCES cadence_templates(id) ON DELETE CASCADE
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS automation_rules (
+            id {automation_id},
+            name TEXT NOT NULL,
+            event_name TEXT NOT NULL,
+            conditions_json TEXT NOT NULL,
+            actions_json TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+            id {webhook_id},
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            events_json TEXT NOT NULL,
+            secret TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS webhook_deliveries (
+            id {webhook_delivery_id},
+            webhook_id INTEGER NOT NULL,
+            event_name TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            http_status INTEGER,
+            error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT,
+            FOREIGN KEY (webhook_id) REFERENCES webhook_subscriptions(id) ON DELETE CASCADE
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS user_roles (
+            id {role_id},
+            email TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL DEFAULT 'SELLER',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS import_batches (
+            id {import_id},
+            filename TEXT,
+            imported_by TEXT,
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            imported_rows INTEGER NOT NULL DEFAULT 0,
+            duplicate_rows INTEGER NOT NULL DEFAULT 0,
+            error_rows INTEGER NOT NULL DEFAULT 0,
+            summary_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+    )
+    _execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS privacy_requests (
+            id {privacy_id},
+            request_type TEXT NOT NULL,
+            business_key TEXT,
+            contact_value TEXT,
+            requested_by TEXT,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            details TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """,
+    )
+
     indexes = [
         ("idx_businesses_pipeline", "CREATE INDEX IF NOT EXISTS idx_businesses_pipeline ON businesses(pipeline_status)"),
         ("idx_businesses_score", "CREATE INDEX IF NOT EXISTS idx_businesses_score ON businesses(score)"),
@@ -655,6 +825,12 @@ def _apply_schema(conn):
         ("idx_audit_created", "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)"),
         ("idx_businesses_reanalysis", "CREATE INDEX IF NOT EXISTS idx_businesses_reanalysis ON businesses(next_reanalysis_at)"),
         ("idx_provider_usage_created", "CREATE INDEX IF NOT EXISTS idx_provider_usage_created ON provider_usage(created_at,provider)"),
+        ("idx_businesses_identity", "CREATE INDEX IF NOT EXISTS idx_businesses_identity ON businesses(identity_key)"),
+        ("idx_lead_changes_key", "CREATE INDEX IF NOT EXISTS idx_lead_changes_key ON lead_changes(business_key,created_at DESC)"),
+        ("idx_lead_cadences_key", "CREATE INDEX IF NOT EXISTS idx_lead_cadences_key ON lead_cadences(business_key,status)"),
+        ("idx_automation_event", "CREATE INDEX IF NOT EXISTS idx_automation_event ON automation_rules(event_name,active)"),
+        ("idx_webhook_delivery", "CREATE INDEX IF NOT EXISTS idx_webhook_delivery ON webhook_deliveries(status,created_at)"),
+        ("idx_import_created", "CREATE INDEX IF NOT EXISTS idx_import_created ON import_batches(created_at DESC)"),
     ]
     for index_name, ddl in indexes:
         _ensure_index(conn, index_name, ddl)
@@ -681,6 +857,15 @@ def _apply_schema(conn):
         "icp_profiles",
         "audit_logs",
         "provider_usage",
+        "lead_changes",
+        "cadence_templates",
+        "lead_cadences",
+        "automation_rules",
+        "webhook_subscriptions",
+        "webhook_deliveries",
+        "user_roles",
+        "import_batches",
+        "privacy_requests",
     ])
 
     _set_schema_version(conn, SCHEMA_VERSION)
@@ -784,11 +969,15 @@ def _decode_business(row):
     }:
         if r.get(f) is not None:
             r[f] = bool(r[f])
-    for f, default in (("score_reasons", []), ("learning_reasons", []), ("emails_found", []), ("decision_maker_candidates", [])):
+    for f, default in (("score_reasons", []), ("learning_reasons", []), ("emails_found", []), ("decision_maker_candidates", []), ("source_keys_json", []), ("product_fit_json", {}), ("tags_json", []), ("change_summary_json", [])):
         try:
             r[f] = json.loads(r.get(f) or "[]")
         except Exception:
             r[f] = default
+    r["source_keys"] = r.pop("source_keys_json", [])
+    r["product_fit"] = r.pop("product_fit_json", {})
+    r["tags"] = r.pop("tags_json", [])
+    r["change_summary"] = r.pop("change_summary_json", [])
     return r
 
 
@@ -816,6 +1005,16 @@ def upsert_businesses(rows):
                         "INSERT INTO business_snapshots(business_key,snapshot_json,reason,created_at) VALUES(?,?,?,?)",
                         (row["business_key"], json.dumps(snapshot, ensure_ascii=False), "DIGITAL_CHANGE", now),
                     )
+                    change_summary=[]
+                    for field in tracked:
+                        incoming=row.get(field)
+                        previous=current.get(field)
+                        if incoming is not None and str(incoming)!=str(previous):
+                            _execute(conn,"INSERT INTO lead_changes(business_key,field_name,old_value,new_value,change_type,created_at) VALUES(?,?,?,?,?,?)",
+                                     (row["business_key"],field,None if previous is None else str(previous),None if incoming is None else str(incoming),"DIGITAL_CHANGE",now))
+                            change_summary.append({"field":field,"old":previous,"new":incoming,"at":now})
+                    if change_summary:
+                        row["change_summary"]=(row.get("change_summary") or [])+change_summary
             preserved = {k: current.get(k) for k in preserve_fields}
             first_seen = preserved.get("first_seen_at") or now
             pipeline_status = preserved.get("pipeline_status") or row.get("pipeline_status") or "NEW"
@@ -880,6 +1079,15 @@ def upsert_businesses(rows):
                 "target_fit_score": row.get("target_fit_score"),
                 "target_fit_reason": row.get("target_fit_reason"),
                 "is_large_chain": _bool(row.get("is_large_chain")),
+                "identity_key": row.get("identity_key") or current.get("identity_key"),
+                "source_keys_json": _json(row.get("source_keys") or current.get("source_keys_json"), []),
+                "digital_gap_score": row.get("digital_gap_score"),
+                "commercial_fit_score": row.get("commercial_fit_score"),
+                "conversion_confidence": row.get("conversion_confidence"),
+                "expected_mrr_value": row.get("expected_mrr_value"),
+                "product_fit_json": _json(row.get("product_fit"), {}),
+                "tags_json": _json(row.get("tags"), []),
+                "change_summary_json": _json(row.get("change_summary"), []),
                 "last_objection_code": current.get("last_objection_code"),
                 "last_objection_note": current.get("last_objection_note"),
             }
@@ -1314,38 +1522,33 @@ def create_search_job(query_text, center, radius_m, provider, rows, config=None,
     existing = existing_business_keys(keys)
     new_count = sum(k not in existing for k in keys)
     reused_count = len(keys) - new_count
-    config_json = json.dumps(config or {}, ensure_ascii=False)
+    cfg=config or {}
+    discovery=cfg.get('discovery_meta') or {}
+    source_counts_json=json.dumps(discovery.get('source_counts') or {},ensure_ascii=False)
+    raw_discovered=int(discovery.get('raw_discovered_count') or len(rows))
+    deduplicated=int(discovery.get('deduplicated_count') or len(rows))
+    incremental_from=cfg.get('incremental_from_job_id')
+    estimated_cost=float(cfg.get('estimated_cost_usd') or 0)
+    config_json = json.dumps(cfg, ensure_ascii=False)
     with _conn() as conn:
+        cols="query_text,center_lat,center_lon,center_display_name,radius_m,provider,status,stage,total_items,processed_items,failed_items,reused_items,new_items,config_json,created_by,created_at,updated_at,source_counts_json,raw_discovered_count,deduplicated_count,incremental_from_job_id,estimated_cost_usd,snapshot_locked"
+        vals=(query_text,float(center["lat"]),float(center["lon"]),center.get("display_name"),int(radius_m),provider,len(rows),reused_count,new_count,config_json,created_by or "",now,now,source_counts_json,raw_discovered,deduplicated,incremental_from,estimated_cost,1)
         if USE_POSTGRES:
-            cur = _execute(
-                conn,
-                """INSERT INTO search_jobs(query_text,center_lat,center_lon,center_display_name,radius_m,provider,status,stage,total_items,processed_items,failed_items,reused_items,new_items,config_json,created_by,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,'RUNNING','ANALYZING',?,0,0,?,?,?, ?,?,?) RETURNING id""",
-                (query_text, float(center["lat"]), float(center["lon"]), center.get("display_name"), int(radius_m), provider,
-                 len(rows), reused_count, new_count, config_json, created_by or "", now, now),
-            )
+            cur = _execute(conn, f"""INSERT INTO search_jobs({cols})
+               VALUES(?,?,?,?,?,?,'RUNNING','ANALYZING',?,0,0,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", vals)
             job_id = cur.fetchone()["id"]
         else:
-            cur = _execute(
-                conn,
-                """INSERT INTO search_jobs(query_text,center_lat,center_lon,center_display_name,radius_m,provider,status,stage,total_items,processed_items,failed_items,reused_items,new_items,config_json,created_by,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,'RUNNING','ANALYZING',?,0,0,?,?,?, ?,?,?)""",
-                (query_text, float(center["lat"]), float(center["lon"]), center.get("display_name"), int(radius_m), provider,
-                 len(rows), reused_count, new_count, config_json, created_by or "", now, now),
-            )
+            cur = _execute(conn, f"""INSERT INTO search_jobs({cols})
+               VALUES(?,?,?,?,?,?,'RUNNING','ANALYZING',?,0,0,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
             job_id = cur.lastrowid
         for row in rows:
             if not row.get("business_key"):
                 continue
             raw = json.dumps(row, ensure_ascii=False, default=str)
-            _execute(
-                conn,
-                """INSERT INTO search_job_items(job_id,business_key,status,raw_json,created_at,updated_at)
-                   VALUES(?,?,'PENDING',?,?,?) ON CONFLICT(job_id,business_key) DO NOTHING""",
-                (job_id, row["business_key"], raw, now, now),
-            )
+            _execute(conn,"""INSERT INTO search_job_items(job_id,business_key,status,raw_json,created_at,updated_at)
+               VALUES(?,?,'PENDING',?,?,?) ON CONFLICT(job_id,business_key) DO NOTHING""",(job_id,row["business_key"],raw,now,now))
         if not rows:
-            _execute(conn, "UPDATE search_jobs SET status='DONE',stage='DONE',updated_at=? WHERE id=?", (now, job_id))
+            _execute(conn,"UPDATE search_jobs SET status='DONE',stage='DONE',updated_at=? WHERE id=?",(now,job_id))
         conn.commit()
         return int(job_id)
 
@@ -1360,13 +1563,25 @@ def get_search_job(job_id):
         out["config"] = json.loads(out.get("config_json") or "{}")
     except Exception:
         out["config"] = {}
+    try:
+        out["source_counts"] = json.loads(out.get("source_counts_json") or "{}")
+    except Exception:
+        out["source_counts"] = {}
     return out
 
 
 def list_search_jobs(limit=30):
     with _conn() as conn:
         rows = _execute(conn, "SELECT * FROM search_jobs ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
-    return [dict(r) for r in rows]
+    out=[]
+    for r in rows:
+        d=dict(r)
+        try:d["config"]=json.loads(d.get("config_json") or "{}")
+        except Exception:d["config"]={}
+        try:d["source_counts"]=json.loads(d.get("source_counts_json") or "{}")
+        except Exception:d["source_counts"]={}
+        out.append(d)
+    return out
 
 
 def recover_stale_search_job_items(job_id, older_minutes=10):
@@ -1576,7 +1791,7 @@ def get_business(business_key):
     return _decode_business(row) if row else None
 
 
-def list_businesses(limit=500, status=None, min_score=None, search=None):
+def list_businesses(limit=500, status=None, min_score=None, search=None, offset=0):
     clauses=[]; params=[]
     if status:
         clauses.append("pipeline_status=?"); params.append(status)
@@ -1587,7 +1802,7 @@ def list_businesses(limit=500, status=None, min_score=None, search=None):
         q=f"%{str(search).lower()}%"; params.extend([q,q])
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     with _conn() as conn:
-        rows=_execute(conn, f"SELECT * FROM businesses{where} ORDER BY COALESCE(visit_priority_score,score,0) DESC, last_seen_at DESC LIMIT ?", tuple(params+[int(limit)])).fetchall()
+        rows=_execute(conn, f"SELECT * FROM businesses{where} ORDER BY COALESCE(visit_priority_score,score,0) DESC, last_seen_at DESC LIMIT ? OFFSET ?", tuple(params+[int(limit),int(offset)])).fetchall()
     return [_decode_business(r) for r in rows]
 
 
@@ -1685,6 +1900,11 @@ def dashboard_advanced():
           SUM(CASE WHEN pipeline_status='CLIENT' THEN 1 ELSE 0 END) AS clients,
           ROUND(AVG(CASE WHEN pipeline_status='CLIENT' THEN opportunity_score END),1) AS avg_client_opportunity
           FROM businesses GROUP BY COALESCE(score_profile,'Geral') ORDER BY clients DESC,leads DESC""").fetchall()
+        activity_people=_execute(conn, """SELECT COALESCE(NULLIF(actor_email,''),'sistema') AS member,COUNT(*) AS activities,
+          SUM(CASE WHEN activity_type IN ('VISIT','ARRIVED','STREET_OUTCOME') THEN 1 ELSE 0 END) AS visits
+          FROM activities GROUP BY COALESCE(NULLIF(actor_email,''),'sistema') ORDER BY activities DESC LIMIT 20""").fetchall()
+        client_people=_execute(conn, """SELECT COALESCE(NULLIF(assigned_to,''),'não atribuído') AS member,COUNT(*) AS clients
+          FROM businesses WHERE pipeline_status='CLIENT' GROUP BY COALESCE(NULLIF(assigned_to,''),'não atribuído')""").fetchall()
     with _conn() as conn:
         signal_rows = _execute(conn, """SELECT business_key,pipeline_status,website,manual_booking_detected,has_booking,has_catalog,target_fit_score,reviews
           FROM businesses WHERE COALESCE(is_large_chain,0)=0""").fetchall()
@@ -1704,9 +1924,14 @@ def dashboard_advanced():
     converting_signals.sort(key=lambda x:(x["clients"],x["conversion_pct"]),reverse=True)
     usage=ai_usage_today()
     summary=dashboard_summary()
+    clients_by={str(r["member"]):int(r["clients"] or 0) for r in client_people}
+    leaderboard=[]
+    for r in activity_people:
+        member=str(r["member"]);activities=int(r["activities"] or 0);visits=int(r["visits"] or 0);clients=int(clients_by.get(member,0))
+        leaderboard.append({"member":member,"activities":activities,"visits":visits,"clients":clients,"conversion_pct":round(100*clients/max(1,visits),1)})
     return {"summary":summary,"funnel":funnel,"campaigns":[dict(r) for r in campaigns],"providers":[dict(r) for r in providers],
             "objections":[dict(r) for r in objections],"losses":[dict(r) for r in losses],"pitch_ab":[dict(r) for r in pitches],
-            "converting":[dict(r) for r in converting],"converting_signals":converting_signals,"ai_usage":usage}
+            "converting":[dict(r) for r in converting],"converting_signals":converting_signals,"ai_usage":usage,"leaderboard":leaderboard}
 
 def latest_search_job_for_business(business_key):
     with _conn() as conn:
@@ -1717,3 +1942,258 @@ def latest_search_job_for_business(business_key):
     try: out['config']=json.loads(out.get('config_json') or '{}')
     except Exception: out['config']={}
     return out
+
+# --- Intelligence / identity extensions -------------------------------------------------
+
+def resolve_identity_rows(rows):
+    """Map provider-specific discoveries to a stable business_key when possible."""
+    if not rows:
+        return rows
+    from identity import identity_key as compute_identity, merge_source_keys
+    with _conn() as conn:
+        for row in rows:
+            original=row.get('business_key')
+            ik=compute_identity(row)
+            row['identity_key']=ik
+            existing=_execute(conn,"SELECT business_key,source_keys_json FROM businesses WHERE identity_key=? ORDER BY first_seen_at LIMIT 1",(ik,)).fetchone()
+            if existing:
+                try:
+                    prev=json.loads(existing.get('source_keys_json') or '[]') if hasattr(existing,'get') else json.loads(existing['source_keys_json'] or '[]')
+                except Exception:
+                    prev=[]
+                row['source_keys']=merge_source_keys(prev,original)
+                row['provider_business_key']=original
+                row['business_key']=existing['business_key']
+            else:
+                row['source_keys']=merge_source_keys(row.get('source_keys'),original)
+    return rows
+
+
+def decorate_business_intelligence(rows):
+    if not rows:
+        return rows
+    from intelligence import compute_lead_intelligence
+    for row in rows:
+        intel=compute_lead_intelligence(row)
+        row.update({k:v for k,v in intel.items() if k not in {'competitor_playbook','decision_reasons'}})
+        tags=[]
+        if not row.get('website'): tags.append('Sem site')
+        if not row.get('has_booking'): tags.append('Sem agenda')
+        if row.get('manual_booking_detected'): tags.append('Agenda manual')
+        if int(row.get('visit_priority_score') or 0)>=80: tags.append('Alta prioridade')
+        if row.get('competitor_detected'): tags.append('Usa concorrente')
+        if not row.get('is_large_chain'): tags.append('Negócio local')
+        row['tags']=tags
+    return rows
+
+
+def load_lead_changes(business_key, limit=100):
+    with _conn() as conn:
+        rows=_execute(conn,"SELECT * FROM lead_changes WHERE business_key=? ORDER BY created_at DESC LIMIT ?",(business_key,int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def duplicate_contact_candidates(business_key, phone=None, website=None, name=None, limit=20):
+    from identity import norm_phone, norm_domain, norm_text
+    ph=norm_phone(phone); dom=norm_domain(website); nm=norm_text(name)
+    candidates=[]
+    with _conn() as conn:
+        rows=_execute(conn,"SELECT * FROM businesses WHERE business_key<>? ORDER BY last_seen_at DESC LIMIT 3000",(business_key,)).fetchall()
+    for raw in rows:
+        r=_decode_business(raw)
+        reasons=[]
+        if ph and ph==norm_phone(r.get('phone') or r.get('contact_phone')): reasons.append('mesmo telefone')
+        if dom and dom==norm_domain(r.get('website')): reasons.append('mesmo domínio')
+        if nm and nm==norm_text(r.get('name')) and r.get('district_name'): reasons.append('mesmo nome')
+        if reasons:
+            candidates.append({'lead':r,'reasons':reasons})
+        if len(candidates)>=int(limit): break
+    return candidates
+
+
+def list_cadence_templates(active_only=True):
+    q="SELECT * FROM cadence_templates"+(" WHERE active=1" if active_only else "")+" ORDER BY name"
+    with _conn() as conn: rows=_execute(conn,q).fetchall()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        try:d['steps']=json.loads(d.pop('steps_json') or '[]')
+        except Exception:d['steps']=[]
+        out.append(d)
+    return out
+
+
+def save_cadence_template(name, description, steps, actor_email=''):
+    now=datetime.now(timezone.utc).isoformat(); payload=json.dumps(steps or [],ensure_ascii=False)
+    with _conn() as conn:
+        _execute(conn,"""INSERT INTO cadence_templates(name,description,steps_json,active,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET description=excluded.description,steps_json=excluded.steps_json,active=1,updated_at=excluded.updated_at""",(name,description or '',payload,1,now,now));conn.commit()
+        row=_execute(conn,"SELECT * FROM cadence_templates WHERE name=?",(name,)).fetchone()
+    d=dict(row);d['steps']=json.loads(d.pop('steps_json') or '[]');return d
+
+
+def assign_cadence(business_key, cadence_id, actor_email=''):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        c=_execute(conn,"SELECT * FROM cadence_templates WHERE id=? AND active=1",(int(cadence_id),)).fetchone()
+        if not c: raise ValueError('Cadência não encontrada')
+        try:steps=json.loads(c['steps_json'] or '[]')
+        except Exception:steps=[]
+        first=steps[0] if steps else {}
+        due=(datetime.now(timezone.utc)+timedelta(days=int(first.get('delay_days') or 0))).isoformat()
+        _execute(conn,"UPDATE lead_cadences SET status='CANCELED',updated_at=? WHERE business_key=? AND status='ACTIVE'",(now,business_key))
+        if USE_POSTGRES:
+            row=_execute(conn,"INSERT INTO lead_cadences(business_key,cadence_id,current_step,status,next_due_at,created_by,created_at,updated_at) VALUES(?,?,0,'ACTIVE',?,?,?,?) RETURNING id",(business_key,int(cadence_id),due,actor_email or None,now,now)).fetchone();cid=row['id']
+        else:
+            cur=_execute(conn,"INSERT INTO lead_cadences(business_key,cadence_id,current_step,status,next_due_at,created_by,created_at,updated_at) VALUES(?,?,0,'ACTIVE',?,?,?,?)",(business_key,int(cadence_id),due,actor_email or None,now,now));cid=cur.lastrowid
+        if first:
+            _execute(conn,"INSERT INTO followups(business_key,title,due_at,status,source,notes,created_at) VALUES(?,?,?,'PENDING','CADENCE',?,?)",(business_key,first.get('title') or first.get('action') or 'Próximo passo da cadência',due,first.get('notes') or '',now))
+        conn.commit()
+    return int(cid)
+
+
+def list_lead_cadences(business_key=None):
+    q="""SELECT lc.*,c.name cadence_name,c.steps_json FROM lead_cadences lc JOIN cadence_templates c ON c.id=lc.cadence_id"""
+    params=[]
+    if business_key:q+=' WHERE lc.business_key=?';params=[business_key]
+    q+=' ORDER BY lc.updated_at DESC'
+    with _conn() as conn:rows=_execute(conn,q,tuple(params)).fetchall()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        try:d['steps']=json.loads(d.pop('steps_json') or '[]')
+        except Exception:d['steps']=[]
+        out.append(d)
+    return out
+
+
+def list_automation_rules(active_only=False):
+    q='SELECT * FROM automation_rules'+(' WHERE active=1' if active_only else '')+' ORDER BY created_at DESC'
+    with _conn() as conn:rows=_execute(conn,q).fetchall()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        for src,dst,default in [('conditions_json','conditions',{}),('actions_json','actions',[])]:
+            try:d[dst]=json.loads(d.pop(src) or json.dumps(default))
+            except Exception:d[dst]=default
+        out.append(d)
+    return out
+
+
+def save_automation_rule(data, actor_email=''):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        if USE_POSTGRES:
+            row=_execute(conn,"INSERT INTO automation_rules(name,event_name,conditions_json,actions_json,active,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id",(data.get('name') or 'Automação',data.get('event_name') or 'lead.updated',json.dumps(data.get('conditions') or {},ensure_ascii=False),json.dumps(data.get('actions') or [],ensure_ascii=False),1 if data.get('active',True) else 0,actor_email or None,now,now)).fetchone();rid=row['id']
+        else:
+            cur=_execute(conn,"INSERT INTO automation_rules(name,event_name,conditions_json,actions_json,active,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(data.get('name') or 'Automação',data.get('event_name') or 'lead.updated',json.dumps(data.get('conditions') or {},ensure_ascii=False),json.dumps(data.get('actions') or [],ensure_ascii=False),1 if data.get('active',True) else 0,actor_email or None,now,now));rid=cur.lastrowid
+        conn.commit()
+    return int(rid)
+
+
+def set_automation_active(rule_id, active):
+    with _conn() as conn:_execute(conn,"UPDATE automation_rules SET active=?,updated_at=? WHERE id=?",(1 if active else 0,datetime.now(timezone.utc).isoformat(),int(rule_id)));conn.commit()
+
+
+def list_webhooks(active_only=False):
+    q='SELECT * FROM webhook_subscriptions'+(' WHERE active=1' if active_only else '')+' ORDER BY created_at DESC'
+    with _conn() as conn:rows=_execute(conn,q).fetchall()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        try:d['events']=json.loads(d.pop('events_json') or '[]')
+        except Exception:d['events']=[]
+        d.pop('secret',None)
+        out.append(d)
+    return out
+
+
+def save_webhook(data, actor_email=''):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        if USE_POSTGRES:
+            row=_execute(conn,"INSERT INTO webhook_subscriptions(name,url,events_json,secret,active,created_by,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?) RETURNING id",(data.get('name') or 'Webhook',data['url'],json.dumps(data.get('events') or ['lead.client'],ensure_ascii=False),data.get('secret') or None,actor_email or None,now,now)).fetchone();wid=row['id']
+        else:
+            cur=_execute(conn,"INSERT INTO webhook_subscriptions(name,url,events_json,secret,active,created_by,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?)",(data.get('name') or 'Webhook',data['url'],json.dumps(data.get('events') or ['lead.client'],ensure_ascii=False),data.get('secret') or None,actor_email or None,now,now));wid=cur.lastrowid
+        conn.commit()
+    return int(wid)
+
+
+def list_user_roles():
+    with _conn() as conn: rows=_execute(conn,"SELECT * FROM user_roles WHERE active=1 ORDER BY email").fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_user_role(email, role):
+    now=datetime.now(timezone.utc).isoformat();role=(role or 'SELLER').upper()
+    if role not in {'ADMIN','MANAGER','SELLER','VIEWER'}:raise ValueError('Papel inválido')
+    with _conn() as conn:_execute(conn,"INSERT INTO user_roles(email,role,active,created_at,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(email) DO UPDATE SET role=excluded.role,active=1,updated_at=excluded.updated_at",(email.lower(),role,now,now));conn.commit()
+    return {'email':email.lower(),'role':role}
+
+
+def record_import_batch(filename, actor_email, total, imported, duplicates, errors, summary=None):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        if USE_POSTGRES:
+            row=_execute(conn,"INSERT INTO import_batches(filename,imported_by,total_rows,imported_rows,duplicate_rows,error_rows,summary_json,created_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id",(filename,actor_email,total,imported,duplicates,errors,json.dumps(summary or {},ensure_ascii=False),now)).fetchone();iid=row['id']
+        else:
+            cur=_execute(conn,"INSERT INTO import_batches(filename,imported_by,total_rows,imported_rows,duplicate_rows,error_rows,summary_json,created_at) VALUES(?,?,?,?,?,?,?,?)",(filename,actor_email,total,imported,duplicates,errors,json.dumps(summary or {},ensure_ascii=False),now));iid=cur.lastrowid
+        conn.commit()
+    return int(iid)
+
+
+def list_import_batches(limit=50):
+    with _conn() as conn:rows=_execute(conn,"SELECT * FROM import_batches ORDER BY created_at DESC LIMIT ?",(int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_privacy_request(data, actor_email=''):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        if USE_POSTGRES:
+            row=_execute(conn,"INSERT INTO privacy_requests(request_type,business_key,contact_value,requested_by,status,details,created_at) VALUES(?,?,?,?, 'OPEN',?,?) RETURNING id",(data.get('request_type') or 'REVIEW',data.get('business_key'),data.get('contact_value'),actor_email or None,data.get('details') or '',now)).fetchone();rid=row['id']
+        else:
+            cur=_execute(conn,"INSERT INTO privacy_requests(request_type,business_key,contact_value,requested_by,status,details,created_at) VALUES(?,?,?,?, 'OPEN',?,?)",(data.get('request_type') or 'REVIEW',data.get('business_key'),data.get('contact_value'),actor_email or None,data.get('details') or '',now));rid=cur.lastrowid
+        conn.commit()
+    return int(rid)
+
+
+def list_privacy_requests(limit=100):
+    with _conn() as conn:rows=_execute(conn,"SELECT * FROM privacy_requests ORDER BY created_at DESC LIMIT ?",(int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def complete_privacy_request(request_id, actor_email='', anonymize=False):
+    now=datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        req=_execute(conn,"SELECT * FROM privacy_requests WHERE id=?",(int(request_id),)).fetchone()
+        if not req:
+            raise ValueError('Solicitação de privacidade não encontrada')
+        business_key=req['business_key']
+        if anonymize and business_key:
+            _execute(conn,"""UPDATE businesses SET contact_name='',contact_phone='',notes='',do_not_contact=1,assigned_to='',next_action_at=NULL WHERE business_key=?""",(business_key,))
+            _execute(conn,"UPDATE activities SET details='[conteúdo removido por solicitação de privacidade]' WHERE business_key=?",(business_key,))
+        _execute(conn,"UPDATE privacy_requests SET status='COMPLETED',completed_at=? WHERE id=?",(now,int(request_id)))
+        conn.commit()
+    return {'id':int(request_id),'status':'COMPLETED','anonymized':bool(anonymize and business_key),'completed_by':actor_email}
+
+
+def list_recent_lead_changes(limit=100):
+    with _conn() as conn:
+        rows=_execute(conn,"""SELECT c.*,b.name AS business_name,b.pipeline_status,b.visit_priority_score,b.assigned_to
+          FROM lead_changes c JOIN businesses b ON b.business_key=c.business_key
+          ORDER BY c.created_at DESC LIMIT ?""",(int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+def count_businesses(status=None,min_score=None,search=None):
+    clauses=[];params=[]
+    if status:
+        clauses.append('pipeline_status=?');params.append(status)
+    if min_score is not None:
+        clauses.append('COALESCE(visit_priority_score,score,0)>=?');params.append(int(min_score))
+    if search:
+        clauses.append("(LOWER(name) LIKE ? OR LOWER(COALESCE(address,'')) LIKE ?)")
+        q=f"%{str(search).lower()}%";params.extend([q,q])
+    where=(' WHERE '+' AND '.join(clauses)) if clauses else ''
+    with _conn() as conn:
+        row=_execute(conn,f'SELECT COUNT(*) AS c FROM businesses{where}',tuple(params)).fetchone()
+    return int(row['c'] or 0)

@@ -15,11 +15,15 @@ import {FollowupsPage} from '@/pages/FollowupsPage'
 import {StreetPage} from '@/pages/StreetPage'
 import {RoutesPage} from '@/pages/RoutesPage'
 import {SettingsPage} from '@/pages/SettingsPage'
+import {AdminPage} from '@/pages/AdminPage'
+import {AutomationsPage} from '@/pages/AutomationsPage'
+import {IntelligencePage} from '@/pages/IntelligencePage'
+import {InboxPage} from '@/pages/InboxPage'
 
 export default function App(){return <Routes>
  <Route path="/login" element={<LoginPage/>}/>
  <Route path="/public/report/:token" element={<PublicReportPage/>}/>
  <Route element={<AuthGuard/>}><Route element={<AppLayout/>}>
-  <Route index element={<TodayPage/>}/><Route path="dashboard" element={<DashboardPage/>}/><Route path="search" element={<SearchPage/>}/><Route path="leads" element={<LeadsPage/>}/><Route path="leads/:key" element={<LeadDetailPage/>}/><Route path="reports/:key" element={<ReportPage/>}/><Route path="routes" element={<RoutesPage/>}/><Route path="goals" element={<GoalsPage/>}/><Route path="jobs" element={<JobsPage/>}/><Route path="followups" element={<FollowupsPage/>}/><Route path="street" element={<StreetPage/>}/><Route path="settings" element={<SettingsPage/>}/>
+  <Route index element={<TodayPage/>}/><Route path="inbox" element={<InboxPage/>}/><Route path="dashboard" element={<DashboardPage/>}/><Route path="search" element={<SearchPage/>}/><Route path="leads" element={<LeadsPage/>}/><Route path="leads/:key" element={<LeadDetailPage/>}/><Route path="reports/:key" element={<ReportPage/>}/><Route path="intelligence" element={<IntelligencePage/>}/><Route path="automations" element={<AutomationsPage/>}/><Route path="admin" element={<AdminPage/>}/><Route path="routes" element={<RoutesPage/>}/><Route path="goals" element={<GoalsPage/>}/><Route path="jobs" element={<JobsPage/>}/><Route path="followups" element={<FollowupsPage/>}/><Route path="street" element={<StreetPage/>}/><Route path="settings" element={<SettingsPage/>}/>
  </Route></Route><Route path="*" element={<Navigate to="/" replace/>}/>
  </Routes>}

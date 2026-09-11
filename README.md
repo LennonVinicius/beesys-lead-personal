@@ -1,3 +1,12 @@
+
+## Atualização de usabilidade — busca e rotas
+
+- Resultados de cada processamento agora têm atalhos para **Todos**, **Prioritários**, **Sem site**, **Sem agenda**, **Agenda manual**, **Não visitados** e **Negócios locais**.
+- O botão **Ver todos** abre todos os estabelecimentos do processamento selecionado, sem aplicar o filtro comercial padrão.
+- A página **Rotas** permite escolher explicitamente qual processamento/busca será usado como fonte da rota.
+- Ao selecionar um processamento, a origem é ajustada para o centro daquela busca e apenas os estabelecimentos daquela área entram na seleção.
+- A rota mantém seleção manual, remoção temporária, descarte, fixação e reordenação de paradas.
+
 # BeeSys Lead Search
 
 Aplicação full stack de prospecção local da BeeSys, com frontend React/Vite/TypeScript e backend FastAPI/Python.
@@ -265,3 +274,23 @@ Não é necessário apagar o banco Supabase existente.
 - Transpilação sintática dos arquivos TypeScript/TSX com TypeScript 5.8.3.
 
 O build npm completo depende do download das dependências externas e deve ser confirmado pela Vercel no primeiro deploy.
+
+## Atualização visual e operacional
+
+Esta versão também inclui uma revisão ampla de UX sem trocar a arquitetura React/Vite + FastAPI + Supabase:
+
+- Dashboard executivo com menos ruído, funil e desempenho da equipe por conversão.
+- Central Hoje com rota, follow-ups, leads quentes, aging e projeção de metas.
+- Tema claro/escuro local.
+- CRM com visual em cards ou tabela, favoritos, comparação lado a lado e filtros salvos no dispositivo.
+- Tags automáticas, nível de confiança dos dados e indicador de atualização.
+- Mapa com clusters simples, legenda e modo de oportunidade.
+- Detalhe do lead reorganizado em Visão geral, Presença digital, Comercial, Histórico e Relatório.
+- Linha do tempo do CRM e barra de ações rápidas no celular.
+- Score com explicação visual baseada nos motivos reais armazenados no lead.
+- Modo Rua com barra inferior para ações essenciais.
+- Metas com projeção de ritmo.
+- Rotas com valor esperado de MRR e comparação de tempo/paradas após recalcular.
+- Relatório com quartil, radar de maturidade digital, aviso de amostra pequena, branding de impressão e links públicos com validade escolhida.
+
+Favoritos e visões salvas são armazenados localmente no navegador nesta versão; não alteram o banco e, portanto, não exigem migração.

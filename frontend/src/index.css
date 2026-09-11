@@ -11,3 +11,61 @@
 html,body,#root{min-height:100%;} body{margin:0;background:var(--color-background);color:var(--color-ink);font-family:var(--font-sans)}
 *{box-sizing:border-box}.leaflet-container{font-family:var(--font-sans)}
 @media print {.no-print{display:none!important}.print-card{box-shadow:none!important;border-color:#ddd!important} body{background:white}}
+
+.print-only{display:none!important}
+
+@media print {
+  @page { size: A4; margin: 11mm; }
+
+  html,body,#root{background:#fff!important;color:#111!important;min-height:auto!important}
+  body{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+  .no-print{display:none!important}
+  .print-only{display:block!important}
+
+  .app-main{padding:0!important;margin:0!important;min-height:auto!important}
+  .app-content{max-width:none!important;padding:0!important;margin:0!important}
+  .report-root{display:block!important;max-width:none!important}
+  .report-root>.print-card,
+  .report-root>section.print-card,
+  .report-root>div{break-inside:avoid-page;page-break-inside:avoid}
+
+  .print-card{
+    box-shadow:none!important;
+    border-color:#d9d9df!important;
+    background:#fff!important;
+    break-inside:avoid-page!important;
+    page-break-inside:avoid!important;
+  }
+
+  .report-cover{margin-top:0!important}
+  .report-score-chart{height:285px!important}
+  .report-presence-chart{height:280px!important}
+  .report-comparison-table{break-inside:auto!important;page-break-inside:auto!important}
+  .report-comparison-table table{min-width:0!important;width:100%!important;font-size:9px!important;table-layout:fixed!important}
+  .report-comparison-table th,.report-comparison-table td{padding-right:4px!important;word-break:normal!important}
+  .report-comparison-table tr{break-inside:avoid!important;page-break-inside:avoid!important}
+  .report-opportunity-simulator input{display:none!important}
+  .report-disclaimer{font-size:10px!important}
+
+  a{color:inherit!important;text-decoration:none!important}
+  .recharts-wrapper,.recharts-surface{max-width:100%!important}
+}
+
+/* Tema escuro BeeSys — apenas superfícies internas; relatórios continuam claros na impressão. */
+.dark{
+  --color-background:#11131a;--color-surface:#181b24;--color-surface-hover:#20242f;
+  --color-border:#2a2f3b;--color-border-strong:#3a4050;--color-ink:#f4f5f8;--color-muted:#a7acb8;--color-subtle:#777f8f;
+  --color-primary-soft:#24244a;--color-danger-soft:#351b20;--color-success-soft:#153324;--color-warning-soft:#332713;
+}
+.dark body{background:var(--color-background);color:var(--color-ink)}
+.dark input,.dark select,.dark textarea{background:var(--color-surface);color:var(--color-ink);border-color:var(--color-border)}
+.dark .leaflet-popup-content-wrapper,.dark .leaflet-popup-tip{background:#181b24;color:#f4f5f8}
+
+/* Utilitários de acabamento visual */
+.metric-number{font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.focus-ring:focus-visible{outline:2px solid var(--color-primary);outline-offset:2px}
+.mobile-action-bar{padding-bottom:max(.75rem,env(safe-area-inset-bottom))}
+@media print{.dark{--color-background:#fff;--color-surface:#fff;--color-ink:#111;--color-muted:#666;--color-border:#ddd}}
+.presentation-mode .presentation-secondary{display:none!important}
+.presentation-mode{font-size:1.02em}
+.presentation-mode .report-cover{border-color:var(--color-primary)!important}

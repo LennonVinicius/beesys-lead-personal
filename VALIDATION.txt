@@ -1,0 +1,11 @@
+BeeSys Lead Search - pacote final consolidado
+Gerado em 2026-09-11
+
+Validações realizadas:
+- Backend Python: py_compile OK
+- Importação do backend FastAPI: OK
+- Frontend: dependências não estavam instaladas neste ambiente; execute npm install && npm run build no deploy/Vercel.
+
+Deploy:
+- Vercel Root Directory: frontend
+- Render Root Directory: backend

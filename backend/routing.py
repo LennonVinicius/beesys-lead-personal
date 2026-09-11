@@ -4,6 +4,51 @@ import requests
 
 from providers import haversine_m
 
+DAY_MAP={0:'Mo',1:'Tu',2:'We',3:'Th',4:'Fr',5:'Sa',6:'Su'}
+
+def _minutes(hhmm):
+    try:
+        h,m=hhmm.split(':',1);return int(h)*60+int(m)
+    except Exception:return None
+
+def likely_open_at(opening_hours_text, dt):
+    """Best-effort parser for common OSM opening_hours strings.
+
+    Returns True/False only when a simple rule can be interpreted; otherwise
+    returns None so the planner never invents certainty.
+    """
+    text=(opening_hours_text or '').strip()
+    if not text:return None
+    low=text.lower()
+    if '24/7' in low:return True
+    day=DAY_MAP.get(dt.weekday()); nowm=dt.hour*60+dt.minute
+    for chunk in text.split(';'):
+        chunk=chunk.strip()
+        if not chunk:continue
+        parts=chunk.split()
+        if len(parts)<2:continue
+        days=' '.join(parts[:-1]);hours=parts[-1]
+        day_match=False
+        if day in days:day_match=True
+        for rng in days.split(','):
+            rng=rng.strip()
+            if '-' in rng:
+                a,b=rng.split('-',1)
+                order=['Mo','Tu','We','Th','Fr','Sa','Su']
+                if a in order and b in order and day in order:
+                    ai,bi,di=order.index(a),order.index(b),order.index(day)
+                    if ai<=bi and ai<=di<=bi:day_match=True
+                    elif ai>bi and (di>=ai or di<=bi):day_match=True
+        if not day_match:continue
+        for hrng in hours.split(','):
+            if '-' not in hrng:continue
+            a,b=hrng.split('-',1);am,bm=_minutes(a),_minutes(b)
+            if am is None or bm is None:continue
+            if am<=bm and am<=nowm<=bm:return True
+            if am>bm and (nowm>=am or nowm<=bm):return True
+        return False
+    return None
+
 ORS_BASE = "https://api.heigit.org/openrouteservice/v2"
 
 
@@ -299,11 +344,16 @@ def plan_route_advanced(origin, candidates, profile='driving-car', ors_key=None,
                 omitted.append({'business_key':lead['business_key'],'name':lead.get('name'),'reason':'Não cabe na janela de tempo configurada'})
                 continue
         arrival=current_time+timedelta(seconds=travel_s);departure=arrival+timedelta(seconds=stop_s)
+        open_at_arrival=likely_open_at(lead.get('opening_hours_text'),arrival)
+        if open_at_arrival is False and lead['business_key'] not in fixed:
+            omitted.append({'business_key':lead['business_key'],'name':lead.get('name'),'reason':'Provavelmente fechado no horário estimado de chegada'})
+            continue
         schedule.append({'business_key':lead['business_key'],'name':lead.get('name'),'arrival':arrival.isoformat(),
             'departure':departure.isoformat(),'travel_minutes':round(travel_s/60,1),'visit_minutes':int(visit_minutes),
             'expected_mrr_value':round(_lead_expected_value(lead),2),'conversion_probability':lead.get('conversion_probability'),
             'visit_priority_score':lead.get('visit_priority_score'),'fixed':lead['business_key'] in fixed,
-            'why_approach':lead.get('why_approach'),'open_now':lead.get('open_now')})
+            'why_approach':lead.get('why_approach'),'open_now':lead.get('open_now'),'open_at_arrival':open_at_arrival,
+            'opening_hours_text':lead.get('opening_hours_text'),'hours_warning':('Horário não pôde ser confirmado' if open_at_arrival is None else ('Fora do horário conhecido' if open_at_arrival is False else None))})
         chosen.append(lead);used_seconds+=travel_s+stop_s;current_time=departure;current_idx=i
     points=[origin]+[(x['lat'],x['lon']) for x in chosen]
     if end and (not points or points[-1]!=end):points.append(end)

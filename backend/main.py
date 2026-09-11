@@ -1,10 +1,12 @@
 import os
 import threading
 import time
+import base64
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -15,7 +17,10 @@ from db import (
     goal_progress, init_db, list_businesses, list_businesses_by_city, list_businesses_by_district,
     list_campaigns, list_search_jobs, list_team_members, load_activities, load_followups, load_goals, latest_search_job_for_business,
     load_job_businesses, load_objections, quick_outcome, record_objection, set_app_setting, update_crm, update_visit,
-    upsert_businesses, recalculate_business_score,
+    upsert_businesses, recalculate_business_score, resolve_identity_rows, load_lead_changes, duplicate_contact_candidates,
+    list_cadence_templates, save_cadence_template, assign_cadence, list_lead_cadences,
+    list_automation_rules, save_automation_rule, set_automation_active, list_webhooks, save_webhook,
+    list_user_roles, upsert_user_role, record_import_batch, list_import_batches, create_privacy_request, list_privacy_requests, complete_privacy_request, list_recent_lead_changes,
 )
 from jobs import process_search_job_batch
 from providers import (
@@ -31,6 +36,10 @@ from operations import (
     create_route_record, get_route, list_routes, update_route_stops, update_route_stop_status,
     create_territory, list_territories, upsert_icp, list_icps, export_full, campaign_financials, record_provider_usage, provider_usage_summary,
 )
+from intelligence import intelligence_overview, natural_filter, copilot_answer, compute_lead_intelligence, competitor_playbook
+from identity import identity_key as compute_identity_key
+from webhooks import validate_webhook_url, dispatch_event, list_deliveries
+from automation_engine import run_automations
 
 app = FastAPI(title="BeeSys Lead Search API", version="2.0.0")
 _ACTIVE_JOBS = set()
@@ -96,6 +105,7 @@ class SearchIn(BaseModel):
     include_large_chains: bool = False
     icp_name: Optional[str] = None
     territory_id: Optional[int] = None
+    incremental_from_job_id: Optional[int] = None
 
 
 class CRMIn(BaseModel):
@@ -168,6 +178,7 @@ class RouteIn(BaseModel):
     name: Optional[str] = None
     route_date: Optional[str] = None
     campaign_name: Optional[str] = None
+    start_local: Optional[str] = None
 
 class RouteStopsIn(BaseModel):
     stops: list[dict]
@@ -201,6 +212,57 @@ class MessageIn(BaseModel):
     notes: str = ""
 
 
+class CopilotIn(BaseModel):
+    question: str = Field(..., min_length=2, max_length=1000)
+
+class NaturalQueryIn(BaseModel):
+    query: str = Field(..., min_length=2, max_length=1000)
+
+class CadenceIn(BaseModel):
+    name: str
+    description: str = ""
+    steps: list[dict] = Field(default_factory=list)
+
+class AssignCadenceIn(BaseModel):
+    cadence_id: int
+
+class AutomationIn(BaseModel):
+    name: str
+    event_name: str = "lead.updated"
+    conditions: dict = Field(default_factory=dict)
+    actions: list[dict] = Field(default_factory=list)
+    active: bool = True
+
+class AutomationToggleIn(BaseModel):
+    active: bool
+
+class WebhookIn(BaseModel):
+    name: str
+    url: str
+    events: list[str] = Field(default_factory=lambda:["lead.client"])
+    secret: Optional[str] = None
+
+class RoleIn(BaseModel):
+    email: str
+    role: Literal["ADMIN","MANAGER","SELLER","VIEWER"] = "SELLER"
+
+class ImportLeadsIn(BaseModel):
+    filename: str = "import.csv"
+    rows: list[dict] = Field(default_factory=list, max_length=5000)
+
+class ImportFileIn(BaseModel):
+    filename: str
+    content_base64: str = Field(..., min_length=4)
+
+class PrivacyIn(BaseModel):
+    request_type: str = "REVIEW"
+    business_key: Optional[str] = None
+    contact_value: Optional[str] = None
+    details: str = ""
+
+class PrivacyCompleteIn(BaseModel):
+    anonymize: bool = False
+
 class SettingsIn(BaseModel):
     default_mrr: float = 89.90
     default_score_profile: str = "Auto"
@@ -220,6 +282,21 @@ class SettingsIn(BaseModel):
 
 def _user_email(user):
     return (user.get("email") or "").lower()
+
+def _role_for_user(user):
+    email=_user_email(user)
+    roles=list_user_roles()
+    if not roles:
+        return 'ADMIN'
+    match=next((r for r in roles if (r.get('email') or '').lower()==email),None)
+    return (match.get('role') if match else 'SELLER') or 'SELLER'
+
+
+def _require_role(user, allowed):
+    role=_role_for_user(user)
+    if role not in set(allowed):
+        raise HTTPException(403, 'Seu papel não permite esta ação')
+    return role
 
 
 def _settings():
@@ -270,14 +347,16 @@ def _apply_icp(rows, icp_name):
 
 def _discover(payload: SearchIn):
     groups = []
+    source_counts = {}
+    raw_count = 0
     if payload.provider in {"auto", "geoapify"} and GEOAPIFY_KEY:
         geo_rows=search_geoapify(payload.lat, payload.lon, payload.radius_m, GEOAPIFY_KEY, payload.max_results)
-        groups.append(geo_rows)
+        groups.append(geo_rows); source_counts["Geoapify"]=len(geo_rows); raw_count += len(geo_rows)
         record_provider_usage("Geoapify","places",1,len(geo_rows),{"radius_m":payload.radius_m})
     if payload.provider == "osm" or (payload.provider == "auto" and (not groups or len(groups[0]) < 30)):
         try:
             osm_rows=search_osm(payload.lat, payload.lon, payload.radius_m, payload.max_results)
-            groups.append(osm_rows)
+            groups.append(osm_rows); source_counts["OpenStreetMap"]=len(osm_rows); raw_count += len(osm_rows)
             record_provider_usage("OpenStreetMap","overpass",1,len(osm_rows),{"radius_m":payload.radius_m})
         except ProviderTemporaryError:
             if not groups:
@@ -286,12 +365,25 @@ def _discover(payload: SearchIn):
         if not FOURSQUARE_KEY:
             raise HTTPException(400, "FOURSQUARE_API_KEY não configurada")
         fsq_rows=search_foursquare(payload.lat, payload.lon, payload.radius_m, FOURSQUARE_KEY, max_results=payload.max_results)
-        groups.append(fsq_rows)
+        groups.append(fsq_rows); source_counts["Foursquare"]=len(fsq_rows); raw_count += len(fsq_rows)
         record_provider_usage("Foursquare","places",1,len(fsq_rows),{"radius_m":payload.radius_m})
     if payload.provider == "geoapify" and not GEOAPIFY_KEY:
         raise HTTPException(400, "GEOAPIFY_API_KEY não configurada")
 
     rows = merge_provider_rows(*groups)[:payload.max_results]
+    resolve_identity_rows(rows)
+    dedup_count=len(rows)
+    incremental_filtered=0
+    if payload.incremental_from_job_id:
+        previous=get_search_job(payload.incremental_from_job_id)
+        if previous:
+            from providers import haversine_m
+            prev_radius=int(previous.get('radius_m') or 0)
+            same_center=haversine_m(payload.lat,payload.lon,float(previous.get('center_lat') or payload.lat),float(previous.get('center_lon') or payload.lon)) <= 100
+            if same_center and payload.radius_m > prev_radius:
+                before=len(rows)
+                rows=[r for r in rows if haversine_m(payload.lat,payload.lon,float(r['lat']),float(r['lon'])) > prev_radius*0.97]
+                incremental_filtered=before-len(rows)
     annotate_target_fit(rows)
     prepared = []
     for r in rows:
@@ -303,7 +395,9 @@ def _discover(payload: SearchIn):
         if not payload.include_large_chains and r.get("is_large_chain"):
             continue
         prepared.append(r)
-    return _apply_icp(prepared, payload.icp_name)
+    prepared=_apply_icp(prepared, payload.icp_name)
+    meta={"source_counts":source_counts,"raw_discovered_count":raw_count,"deduplicated_count":dedup_count,"incremental_filtered":incremental_filtered}
+    return prepared,meta
 
 
 def _drain_job(job_id: int):
@@ -387,6 +481,11 @@ def geocode(q: str = Query(min_length=2), user=Depends(get_current_user)):
     return result
 
 
+@app.get('/api/me/role')
+def my_role(user=Depends(get_current_user)):
+    return {'email':_user_email(user),'role':_role_for_user(user)}
+
+
 @app.get("/api/settings")
 def settings_get(user=Depends(get_current_user)):
     s = _settings()
@@ -395,6 +494,7 @@ def settings_get(user=Depends(get_current_user)):
 
 @app.patch("/api/settings")
 def settings_update(payload: SettingsIn, user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
     data = payload.model_dump()
     set_app_setting("lead_search_settings", data)
     audit(_user_email(user), "UPDATE_SETTINGS", "system", "lead_search_settings", data)
@@ -418,7 +518,7 @@ def team(user=Depends(get_current_user)):
 @app.post("/api/searches")
 def create_search(payload: SearchIn, user=Depends(get_current_user)):
     try:
-        rows = _discover(payload)
+        rows, discovery_meta = _discover(payload)
     except ProviderTemporaryError as exc:
         raise HTTPException(503, str(exc))
     _, _, settings = _ai_runtime()
@@ -438,10 +538,12 @@ def create_search(payload: SearchIn, user=Depends(get_current_user)):
         "include_large_chains": payload.include_large_chains,
         "icp_name": payload.icp_name,
         "territory_id": payload.territory_id,
+        "incremental_from_job_id": payload.incremental_from_job_id,
+        "discovery_meta": discovery_meta,
     }
     job_id = create_search_job(payload.query_text, center, payload.radius_m, payload.provider, rows, config, _user_email(user))
     threading.Thread(target=_drain_job, args=(job_id,), daemon=True).start()
-    return {"job_id": job_id, "discovered": len(rows)}
+    return {"job_id": job_id, "discovered": len(rows), **discovery_meta}
 
 
 @app.get("/api/searches")
@@ -499,7 +601,7 @@ def leads(
     return [enrich_lead(r) for r in rows if keep(r)][:limit]
 
 
-@app.get("/api/leads/{business_key:path}")
+@app.get("/api/leads/{business_key}")
 def lead_detail(business_key: str, user=Depends(get_current_user)):
     lead = get_business(business_key)
     if not lead:
@@ -507,10 +609,15 @@ def lead_detail(business_key: str, user=Depends(get_current_user)):
     lead["activities"] = load_activities(business_key, 200)
     lead["objections"] = load_objections(business_key, 100)
     lead["followups"] = [f for f in load_followups(None, 1000) if f.get("business_key") == business_key][:100]
+    lead["changes"] = load_lead_changes(business_key, 100)
+    lead["cadences"] = list_lead_cadences(business_key)
+    lead["duplicates"] = duplicate_contact_candidates(business_key, lead.get("phone") or lead.get("contact_phone"), lead.get("website"), lead.get("name"), 8)
+    lead["intelligence"] = compute_lead_intelligence(lead)
+    lead["competitor_playbook"] = competitor_playbook(lead)
     return enrich_lead(lead)
 
 
-@app.patch("/api/leads/{business_key:path}")
+@app.patch("/api/leads/{business_key}")
 def lead_update(business_key: str, payload: CRMIn, user=Depends(get_current_user)):
     if not get_business(business_key):
         raise HTTPException(404, "Estabelecimento não encontrado")
@@ -522,40 +629,46 @@ def lead_update(business_key: str, payload: CRMIn, user=Depends(get_current_user
     )
     add_activity(business_key, "CRM_UPDATE", payload.notes, payload.pipeline_status, _user_email(user))
     audit(_user_email(user), "UPDATE_CRM", "business", business_key, payload.model_dump())
+    event="lead.client" if payload.pipeline_status=="CLIENT" else "lead.updated"
+    threading.Thread(target=run_automations,args=(event,business_key,_user_email(user)),daemon=True).start()
+    threading.Thread(target=dispatch_event,args=(event,{"business_key":business_key,"pipeline_status":payload.pipeline_status}),daemon=True).start()
     return enrich_lead(get_business(business_key))
 
 
-@app.post("/api/leads/{business_key:path}/activities")
+@app.post("/api/leads/{business_key}/activities")
 def activity(business_key: str, payload: ActivityIn, user=Depends(get_current_user)):
     add_activity(business_key, payload.activity_type, payload.details, payload.outcome, _user_email(user), payload.lat, payload.lon)
     audit(_user_email(user), "ADD_ACTIVITY", "business", business_key, payload.model_dump())
     return {"ok": True}
 
 
-@app.post("/api/leads/{business_key:path}/objections")
+@app.post("/api/leads/{business_key}/objections")
 def objection(business_key: str, payload: ObjectionIn, user=Depends(get_current_user)):
     record_objection(business_key, payload.code, payload.label, payload.details, _user_email(user))
     audit(_user_email(user), "ADD_OBJECTION", "business", business_key, payload.model_dump())
     return {"ok": True}
 
 
-@app.post("/api/leads/{business_key:path}/outcomes")
+@app.post("/api/leads/{business_key}/outcomes")
 def outcome(business_key: str, payload: OutcomeIn, user=Depends(get_current_user)):
     status = quick_outcome(business_key, payload.outcome, payload.notes, _user_email(user))
     if payload.objection_code and payload.objection_label:
         record_objection(business_key, payload.objection_code, payload.objection_label, payload.objection_details, _user_email(user))
     audit(_user_email(user), "QUICK_OUTCOME", "business", business_key, payload.model_dump())
+    event="lead.client" if status=="CLIENT" else "lead.outcome"
+    threading.Thread(target=run_automations,args=(event,business_key,_user_email(user)),daemon=True).start()
+    threading.Thread(target=dispatch_event,args=(event,{"business_key":business_key,"pipeline_status":status,"outcome":payload.outcome}),daemon=True).start()
     return {"ok": True, "pipeline_status": status}
 
 
-@app.post("/api/leads/{business_key:path}/visit")
+@app.post("/api/leads/{business_key}/visit")
 def visit(business_key: str, notes: str = "", user=Depends(get_current_user)):
     update_visit(business_key, True, notes)
     add_activity(business_key, "VISIT", notes, "VISITED", _user_email(user))
     return {"ok": True}
 
 
-@app.get("/api/reports/business/{business_key:path}")
+@app.get("/api/reports/business/{business_key}")
 def business_report(business_key: str, job_id: Optional[int] = None, user=Depends(get_current_user)):
     lead = get_business(business_key)
     if not lead:
@@ -569,11 +682,22 @@ def business_report(business_key: str, job_id: Optional[int] = None, user=Depend
     peers = load_job_businesses(job["id"], 5000) if job else list_businesses_by_city(city, 5000)
     if not peers:
         peers = [lead]
-    return build_business_report(
+    report=build_business_report(
         enrich_lead(lead), peers, job,
         city_peers=list_businesses_by_city(city, 5000),
         district_peers=list_businesses_by_district(city, district, 5000),
     )
+    report["evolution"]=business_evolution(business_key)
+    report["solution_map"]={
+        "NO_WEBSITE":"Página própria BeeSys com conteúdo rastreável e marca do negócio",
+        "SITE_PROBLEM":"Reestruturação da presença própria e página funcional",
+        "MANUAL_BOOKING":"Agenda BeeSys para disponibilidade, confirmações e menos troca manual de mensagens",
+        "NO_BOOKING":"Agendamento online BeeSys integrado ao fluxo do estabelecimento",
+        "NO_CATALOG":"Catálogo/serviços BeeSys para apresentar oferta antes do contato",
+        "NO_STRUCTURED_DATA":"Melhoria de estrutura e dados do negócio na presença própria",
+        "COMPETITOR":"Comparação orientada a dores reais, sem migração forçada",
+    }
+    return report
 
 
 @app.get("/api/dashboard")
@@ -640,7 +764,7 @@ def route_plan(payload: RouteIn, user=Depends(get_current_user)):
     end=(payload.end_lat,payload.end_lon) if payload.end_lat is not None and payload.end_lon is not None else None
     result=plan_route_advanced(
         (payload.origin_lat,payload.origin_lon),leads,payload.mode,os.getenv("ORS_API_KEY") or None,GEOAPIFY_KEY or None,
-        datetime.now(),payload.available_minutes,payload.visit_minutes,payload.max_stops,payload.return_to_start,
+        (datetime.fromisoformat(payload.start_local) if payload.start_local else datetime.now()),payload.available_minutes,payload.visit_minutes,payload.max_stops,payload.return_to_start,
         payload.strategy,end,payload.fixed_business_keys,payload.strategy=="manual",
     )
     result["omitted"] = filtered_out + list(result.get("omitted") or [])
@@ -659,7 +783,7 @@ def today(user=Depends(get_current_user)):
     return today_workspace(_user_email(user))
 
 
-@app.post('/api/reports/business/{business_key:path}/share')
+@app.post('/api/reports/business/{business_key}/share')
 def report_share(business_key: str, payload: PublicReportIn, user=Depends(get_current_user)):
     if not get_business(business_key):
         raise HTTPException(404, 'Estabelecimento não encontrado')
@@ -674,7 +798,20 @@ def report_public(token: str):
     return report
 
 
-@app.post('/api/leads/{business_key:path}/post-visit-message')
+@app.get('/api/public/qr')
+def public_qr(data: str = Query(..., min_length=8, max_length=2000)):
+    from urllib.parse import urlparse
+    parsed=urlparse(data)
+    if parsed.scheme not in {'http','https'} or not parsed.netloc:
+        raise HTTPException(400,'URL inválida para QR Code')
+    # O QR é gerado no próprio backend; o link público não é enviado a terceiros.
+    import qrcode
+    img=qrcode.make(data)
+    buf=io.BytesIO(); img.save(buf,format='PNG')
+    return Response(content=buf.getvalue(),media_type='image/png',headers={'Cache-Control':'private, max-age=300'})
+
+
+@app.post('/api/leads/{business_key}/post-visit-message')
 def post_visit_message(business_key: str, payload: MessageIn, user=Depends(get_current_user)):
     lead = get_business(business_key)
     if not lead:
@@ -682,14 +819,14 @@ def post_visit_message(business_key: str, payload: MessageIn, user=Depends(get_c
     return {'message': build_post_visit_message(enrich_lead(lead), payload.notes)}
 
 
-@app.get('/api/leads/{business_key:path}/evolution')
+@app.get('/api/leads/{business_key}/evolution')
 def lead_evolution(business_key: str, user=Depends(get_current_user)):
     if not get_business(business_key):
         raise HTTPException(404, 'Estabelecimento não encontrado')
     return business_evolution(business_key)
 
 
-@app.post('/api/leads/{business_key:path}/reanalysis/schedule')
+@app.post('/api/leads/{business_key}/reanalysis/schedule')
 def reanalysis_schedule(business_key: str, payload: ReanalysisIn, user=Depends(get_current_user)):
     if not get_business(business_key):
         raise HTTPException(404, 'Estabelecimento não encontrado')
@@ -698,7 +835,7 @@ def reanalysis_schedule(business_key: str, payload: ReanalysisIn, user=Depends(g
     return {'ok': True, 'next_reanalysis_at': due}
 
 
-@app.post('/api/leads/{business_key:path}/reanalysis/run')
+@app.post('/api/leads/{business_key}/reanalysis/run')
 def reanalysis_run(business_key: str, user=Depends(get_current_user)):
     lead = get_business(business_key)
     if not lead:
@@ -739,7 +876,7 @@ def route_stops_update(route_id: int, payload: RouteStopsIn, user=Depends(get_cu
     return update_route_stops(route_id, payload.stops, _user_email(user))
 
 
-@app.patch('/api/routes/{route_id}/stops/{business_key:path}')
+@app.patch('/api/routes/{route_id}/stops/{business_key}')
 def route_stop_update(route_id: int, business_key: str, payload: RouteStopStatusIn, user=Depends(get_current_user)):
     if not get_route(route_id):
         raise HTTPException(404, 'Rota não encontrada')
@@ -780,11 +917,13 @@ def campaign_financial(user=Depends(get_current_user)):
 
 @app.get('/api/audit')
 def audit_logs(limit: int = 300, user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
     return list_audit_logs(limit)
 
 
 @app.get('/api/export/full')
 def export_all(user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
     audit(_user_email(user), 'EXPORT_FULL', 'system', None, {})
     return export_full()
 
@@ -793,6 +932,211 @@ def export_all(user=Depends(get_current_user)):
 def provider_usage(days: int = 30, user=Depends(get_current_user)):
     return provider_usage_summary(days)
 
+
+
+
+@app.get('/api/inbox')
+def commercial_inbox(user=Depends(get_current_user)):
+    email=_user_email(user); role=_role_for_user(user); now=datetime.now(timezone.utc)
+    followups=load_followups('PENDING',500)
+    if role=='SELLER':
+        followups=[f for f in followups if not f.get('assigned_to') or (f.get('assigned_to') or '').lower()==email]
+    due=[f for f in followups if f.get('due_at') and f.get('due_at')<=now.isoformat()]
+    upcoming=[f for f in followups if f not in due][:30]
+    changes=list_recent_lead_changes(80)
+    if role=='SELLER':
+        changes=[c for c in changes if not c.get('assigned_to') or (c.get('assigned_to') or '').lower()==email]
+    stalled=[enrich_lead(x) for x in list_businesses(1000) if x.get('pipeline_status') in {'INTERESTED','DEMO','PROPOSAL'} and int(x.get('aging_days') or 0)>=7]
+    if role=='SELLER': stalled=[x for x in stalled if not x.get('assigned_to') or (x.get('assigned_to') or '').lower()==email]
+    return {'due_followups':due[:50],'upcoming':upcoming[:30],'changes':changes[:50],'stalled':stalled[:40],'role':role}
+
+@app.get('/api/intelligence/overview')
+def intelligence_dashboard(user=Depends(get_current_user)):
+    return intelligence_overview(list_businesses(5000))
+
+@app.post('/api/intelligence/query')
+def intelligence_query(payload: NaturalQueryIn, user=Depends(get_current_user)):
+    return natural_filter(payload.query, list_businesses(5000))
+
+@app.post('/api/intelligence/copilot')
+def intelligence_copilot(payload: CopilotIn, user=Depends(get_current_user)):
+    return copilot_answer(payload.question, list_businesses(5000), _user_email(user))
+
+@app.get('/api/leads/{business_key}/changes')
+def lead_changes(business_key: str, user=Depends(get_current_user)):
+    return load_lead_changes(business_key, 200)
+
+@app.get('/api/leads/{business_key}/briefing')
+def lead_briefing(business_key: str, user=Depends(get_current_user)):
+    lead=get_business(business_key)
+    if not lead: raise HTTPException(404,'Estabelecimento não encontrado')
+    intel=compute_lead_intelligence(lead)
+    return {
+        'lead':enrich_lead(lead),
+        'intelligence':intel,
+        'playbook':competitor_playbook(lead),
+        'duplicates':duplicate_contact_candidates(business_key,lead.get('phone') or lead.get('contact_phone'),lead.get('website'),lead.get('name'),5),
+        'last_activities':load_activities(business_key,5),
+    }
+
+@app.get('/api/cadences')
+def cadences(user=Depends(get_current_user)):
+    return list_cadence_templates(False)
+
+@app.post('/api/cadences')
+def cadence_create(payload: CadenceIn, user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    out=save_cadence_template(payload.name,payload.description,payload.steps,_user_email(user));audit(_user_email(user),'UPSERT_CADENCE','cadence',str(out.get('id')),payload.model_dump());return out
+
+@app.post('/api/leads/{business_key}/cadence')
+def cadence_assign(business_key: str,payload:AssignCadenceIn,user=Depends(get_current_user)):
+    if not get_business(business_key):raise HTTPException(404,'Estabelecimento não encontrado')
+    try:cid=assign_cadence(business_key,payload.cadence_id,_user_email(user))
+    except ValueError as exc:raise HTTPException(400,str(exc))
+    audit(_user_email(user),'ASSIGN_CADENCE','business',business_key,{'cadence_id':payload.cadence_id});return {'ok':True,'lead_cadence_id':cid}
+
+@app.get('/api/automations')
+def automations(user=Depends(get_current_user)):
+    return list_automation_rules(False)
+
+@app.post('/api/automations')
+def automation_create(payload:AutomationIn,user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    rid=save_automation_rule(payload.model_dump(),_user_email(user));audit(_user_email(user),'CREATE_AUTOMATION','automation',str(rid),payload.model_dump());return {'id':rid}
+
+@app.patch('/api/automations/{rule_id}')
+def automation_toggle(rule_id:int,payload:AutomationToggleIn,user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    set_automation_active(rule_id,payload.active);audit(_user_email(user),'TOGGLE_AUTOMATION','automation',str(rule_id),{'active':payload.active});return {'ok':True}
+
+@app.get('/api/webhooks')
+def webhooks(user=Depends(get_current_user)):
+    return list_webhooks(False)
+
+@app.post('/api/webhooks')
+def webhook_create(payload:WebhookIn,user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    try:url=validate_webhook_url(payload.url)
+    except ValueError as exc:raise HTTPException(400,str(exc))
+    wid=save_webhook({**payload.model_dump(),'url':url},_user_email(user));audit(_user_email(user),'CREATE_WEBHOOK','webhook',str(wid),{'name':payload.name,'url':url,'events':payload.events});return {'id':wid}
+
+@app.get('/api/webhooks/deliveries')
+def webhook_deliveries(limit:int=100,user=Depends(get_current_user)):
+    return list_deliveries(limit)
+
+@app.post('/api/import/leads')
+def import_leads(payload:ImportLeadsIn,user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    imported=[];duplicates=0;errors=[]
+    seen=set()
+    for i,raw in enumerate(payload.rows):
+        try:
+            name=str(raw.get('name') or raw.get('nome') or '').strip()
+            if not name:raise ValueError('nome ausente')
+            lat=float(raw.get('lat') or raw.get('latitude'))
+            lon=float(raw.get('lon') or raw.get('longitude'))
+            row={'provider':'Importação','source_id':f'import:{i}','name':name,'address':raw.get('address') or raw.get('endereco'),'lat':lat,'lon':lon,
+                 'category':raw.get('category') or raw.get('categoria'),'phone':raw.get('phone') or raw.get('telefone'),'website':raw.get('website') or raw.get('site'),
+                 'campaign_name':raw.get('campaign_name') or raw.get('campanha') or 'Importação','estimated_mrr':float(raw.get('estimated_mrr') or raw.get('mrr') or _settings().get('default_mrr') or 89.90),
+                 'data_confidence':70,'source_notes':f'Importado de {payload.filename}','raw':raw}
+            row['business_key']=compute_identity_key(row);row['identity_key']=compute_identity_key(row);row['source_keys']=[f'import:{payload.filename}:{i}']
+            if row['identity_key'] in seen:duplicates+=1;continue
+            seen.add(row['identity_key']);imported.append(row)
+        except Exception as exc:errors.append({'row':i+1,'error':str(exc)})
+    resolve_identity_rows(imported)
+    from db import decorate_business_intelligence
+    decorate_business_intelligence(imported);upsert_businesses(imported)
+    iid=record_import_batch(payload.filename,_user_email(user),len(payload.rows),len(imported),duplicates,len(errors),{'errors':errors[:50]})
+    audit(_user_email(user),'IMPORT_LEADS','import',str(iid),{'total':len(payload.rows),'imported':len(imported),'duplicates':duplicates,'errors':len(errors)})
+    return {'batch_id':iid,'total':len(payload.rows),'imported':len(imported),'duplicates':duplicates,'errors':errors[:50]}
+
+@app.post('/api/import/file')
+def import_file(payload: ImportFileIn, user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    name=payload.filename.lower().strip()
+    try:
+        raw=base64.b64decode(payload.content_base64,validate=True)
+    except Exception:
+        raise HTTPException(400,'Arquivo inválido')
+    if len(raw)>12*1024*1024:
+        raise HTTPException(413,'Arquivo maior que 12 MB')
+    rows=[]
+    if name.endswith('.xlsx'):
+        try:
+            from openpyxl import load_workbook
+            wb=load_workbook(io.BytesIO(raw),read_only=True,data_only=True)
+            ws=wb.active
+            values=ws.iter_rows(values_only=True)
+            headers=[str(x or '').strip().lower() for x in next(values)]
+            for vals in values:
+                if len(rows)>=5000: break
+                row={headers[i]:vals[i] for i in range(min(len(headers),len(vals))) if headers[i]}
+                if any(v not in (None,'') for v in row.values()): rows.append(row)
+        except Exception as exc:
+            raise HTTPException(400,f'Não foi possível ler o XLSX: {exc}')
+    elif name.endswith('.csv'):
+        try:
+            import csv
+            text=raw.decode('utf-8-sig')
+            sample=text[:4096]
+            dialect=csv.Sniffer().sniff(sample,delimiters=',;\t')
+            rows=list(csv.DictReader(io.StringIO(text),dialect=dialect))[:5000]
+        except Exception as exc:
+            raise HTTPException(400,f'Não foi possível ler o CSV: {exc}')
+    else:
+        raise HTTPException(400,'Formato suportado: CSV ou XLSX')
+    return import_leads(ImportLeadsIn(filename=payload.filename,rows=rows),user)
+
+@app.get('/api/imports')
+def imports(user=Depends(get_current_user)):
+    return list_import_batches(100)
+
+@app.get('/api/admin/roles')
+def roles(user=Depends(get_current_user)):
+    rows=list_user_roles()
+    if not rows:
+        return [{'email':_user_email(user),'role':'ADMIN','implicit':True}]
+    return rows
+
+@app.post('/api/admin/roles')
+def role_save(payload:RoleIn,user=Depends(get_current_user)):
+    email=_user_email(user)
+    existing=list_user_roles()
+    # O primeiro administrador implícito é persistido antes de criar outros papéis,
+    # evitando que ele perca acesso assim que a tabela deixa de estar vazia.
+    if not existing and email:
+        upsert_user_role(email,'ADMIN')
+        existing=list_user_roles()
+    _require_role(user, {'ADMIN'})
+    target=payload.email.lower().strip()
+    if target==email and payload.role!='ADMIN':
+        other_admin=any((r.get('email') or '').lower()!=email and r.get('role')=='ADMIN' for r in existing)
+        if not other_admin:
+            raise HTTPException(400,'Cadastre outro administrador antes de remover seu próprio papel de Admin')
+    out=upsert_user_role(target,payload.role);audit(email,'UPSERT_ROLE','user',target,{'role':payload.role});return out
+
+@app.get('/api/admin/overview')
+def admin_overview(user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    return {'providers':provider_usage_summary(30),'ai':ai_usage_today(),'audits':list_audit_logs(50),'imports':list_import_batches(30),'roles':list_user_roles(),'privacy':list_privacy_requests(50),'webhook_deliveries':list_deliveries(50)}
+
+@app.get('/api/privacy/requests')
+def privacy_list(user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    return list_privacy_requests(100)
+
+@app.post('/api/privacy/requests')
+def privacy_create(payload:PrivacyIn,user=Depends(get_current_user)):
+    rid=create_privacy_request(payload.model_dump(),_user_email(user));audit(_user_email(user),'PRIVACY_REQUEST','privacy',str(rid),payload.model_dump());return {'id':rid}
+
+
+@app.post('/api/privacy/requests/{request_id}/complete')
+def privacy_complete(request_id:int,payload:PrivacyCompleteIn,user=Depends(get_current_user)):
+    _require_role(user, {'ADMIN','MANAGER'})
+    try:out=complete_privacy_request(request_id,_user_email(user),payload.anonymize)
+    except ValueError as exc:raise HTTPException(404,str(exc))
+    audit(_user_email(user),'COMPLETE_PRIVACY_REQUEST','privacy',str(request_id),{'anonymize':payload.anonymize})
+    return out
 
 @app.get('/api/health/providers')
 def health_providers(user=Depends(get_current_user)):

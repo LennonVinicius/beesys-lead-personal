@@ -206,6 +206,16 @@ def get_public_report(token: str):
         district_peers=list_businesses_by_district(city, district, 5000),
     )
     report["public"] = {"token": token, "expires_at": row.get("expires_at")}
+    report["evolution"] = business_evolution(row["business_key"])
+    report["solution_map"]={
+        "NO_WEBSITE":"Página própria BeeSys com conteúdo rastreável e marca do negócio",
+        "SITE_PROBLEM":"Reestruturação da presença própria e página funcional",
+        "MANUAL_BOOKING":"Agenda BeeSys para disponibilidade, confirmações e menos troca manual de mensagens",
+        "NO_BOOKING":"Agendamento online BeeSys integrado ao fluxo do estabelecimento",
+        "NO_CATALOG":"Catálogo/serviços BeeSys para apresentar oferta antes do contato",
+        "NO_STRUCTURED_DATA":"Melhoria de estrutura e dados do negócio na presença própria",
+        "COMPETITOR":"Comparação orientada a dores reais, sem migração forçada",
+    }
     return report
 
 

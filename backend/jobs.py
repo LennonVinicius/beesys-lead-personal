@@ -6,7 +6,7 @@ from db import (
     hydrate_saved_state,
     load_history,
     recover_stale_search_job_items,
-    upsert_businesses,
+    upsert_businesses, decorate_business_intelligence,
 )
 from analyzer import analyze_many
 from learning import apply_learning, train_conversion_model
@@ -76,6 +76,7 @@ def process_search_job_batch(job_id, batch_size=10, ai_keys=None, ai_models=None
             )
             finalize_visit_priorities(rows)
 
+        decorate_business_intelligence(rows)
         upsert_businesses(rows)
         by_key = {r.get("business_key"): r for r in rows}
         for item in items:

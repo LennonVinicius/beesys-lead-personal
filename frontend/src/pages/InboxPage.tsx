@@ -1,0 +1,23 @@
+import {useQuery} from '@tanstack/react-query'
+import {Link} from 'react-router-dom'
+import {AlertCircle,ArrowRight,Clock3,History,Inbox,RefreshCw} from 'lucide-react'
+import {api} from '@/services/api'
+import {Card} from '@/components/ui/Card'
+import {Badge} from '@/components/ui/Badge'
+import {PageSkeleton} from '@/components/ui/Skeleton'
+import type {Followup,Lead,LeadChange} from '@/types'
+
+type InboxData={due_followups:Followup[];upcoming:Followup[];changes:(LeadChange&{business_name?:string;pipeline_status?:string;visit_priority_score?:number})[];stalled:Lead[];role:string}
+
+export function InboxPage(){
+ const q=useQuery({queryKey:['commercial-inbox'],queryFn:()=>api.get<InboxData>('/api/inbox'),refetchInterval:60000})
+ if(q.isLoading||!q.data)return <PageSkeleton/>
+ const d=q.data
+ return <div className="space-y-7">
+  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[.16em] text-primary">Atenção comercial</p><h1 className="mt-1 text-3xl font-bold">Inbox</h1><p className="mt-1 max-w-3xl text-sm text-muted">Tudo que pede ação: retornos vencidos, oportunidades paradas e mudanças recentes nos estabelecimentos.</p></div><button onClick={()=>q.refetch()} className="inline-flex h-10 items-center gap-2 rounded-xl border border-border px-3 text-sm font-semibold"><RefreshCw className="h-4 w-4"/>Atualizar</button></div>
+  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><Inbox className="h-5 w-5 text-danger"/><p className="mt-3 text-xs text-muted">Follow-ups vencidos</p><b className="text-3xl">{d.due_followups.length}</b></Card><Card><Clock3 className="h-5 w-5 text-warning"/><p className="mt-3 text-xs text-muted">Próximos retornos</p><b className="text-3xl">{d.upcoming.length}</b></Card><Card><AlertCircle className="h-5 w-5 text-warning"/><p className="mt-3 text-xs text-muted">Oportunidades paradas</p><b className="text-3xl">{d.stalled.length}</b></Card><Card><History className="h-5 w-5 text-primary"/><p className="mt-3 text-xs text-muted">Mudanças recentes</p><b className="text-3xl">{d.changes.length}</b></Card></div>
+  <div className="grid gap-5 xl:grid-cols-2"><Card><div className="flex items-center justify-between"><h2 className="font-semibold">Vencidos</h2><Badge tone={d.due_followups.length?'danger':'success'}>{d.due_followups.length}</Badge></div><div className="mt-4 divide-y divide-border">{d.due_followups.slice(0,20).map(f=><Link key={f.id} to={`/leads/${encodeURIComponent(f.business_key)}`} className="block py-3 first:pt-0"><div className="flex justify-between gap-3"><div><b className="text-sm">{f.business_name||f.title}</b><p className="mt-1 text-xs text-muted">{f.title}</p></div><ArrowRight className="h-4 w-4 shrink-0 text-primary"/></div><p className="mt-1 text-xs text-danger">Venceu em {new Date(f.due_at).toLocaleString('pt-BR')}</p></Link>)}{!d.due_followups.length&&<p className="text-sm text-muted">Nenhum retorno vencido.</p>}</div></Card>
+   <Card><h2 className="font-semibold">Pipeline parado</h2><p className="mt-1 text-sm text-muted">Interessados, demos ou propostas sem avanço recente.</p><div className="mt-4 divide-y divide-border">{d.stalled.slice(0,20).map(l=><Link key={l.business_key} to={`/leads/${encodeURIComponent(l.business_key)}`} className="flex items-center justify-between gap-3 py-3 first:pt-0"><div><b className="text-sm">{l.name}</b><p className="mt-1 text-xs text-muted">{l.pipeline_status} · {l.aging_label||`${l.aging_days||0} dias`}</p></div><Badge tone="warning">Prioridade {l.visit_priority_score||0}</Badge></Link>)}{!d.stalled.length&&<p className="text-sm text-muted">Nenhuma oportunidade parada.</p>}</div></Card></div>
+  <Card><h2 className="font-semibold">O que mudou nos leads</h2><p className="mt-1 text-sm text-muted">Útil para reativar uma conversa quando o negócio ganha site, agenda, contato ou muda sua presença digital.</p><div className="mt-4 grid gap-3 md:grid-cols-2">{d.changes.slice(0,24).map(c=><Link key={c.id} to={`/leads/${encodeURIComponent(c.business_key)}`} className="rounded-xl border border-border p-3 hover:bg-surface-hover"><div className="flex items-start justify-between gap-3"><b className="text-sm">{c.business_name||c.business_key}</b><span className="text-[11px] text-muted">{new Date(c.created_at).toLocaleDateString('pt-BR')}</span></div><p className="mt-2 text-xs font-semibold uppercase text-primary">{c.field_name}</p><p className="mt-1 text-xs text-muted">{String(c.old_value??'não identificado')} → {String(c.new_value??'não identificado')}</p></Link>)}{!d.changes.length&&<p className="text-sm text-muted">Nenhuma mudança recente registrada.</p>}</div></Card>
+ </div>
+}
